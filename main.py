@@ -1,9 +1,15 @@
 
+import os
+import time
+import secrets
 from datetime import datetime, timezone
-from fastapi import FastAPI
+from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import HTMLResponse
 
 app = FastAPI(title="Remote Lab")
+
+# 테스트 장치의 마지막 접속 시각
+last_heartbeat = 0.0
 
 HTML_PAGE = """
 <!DOCTYPE html>
@@ -21,16 +27,17 @@ HTML_PAGE = """
             font-family: Arial, sans-serif;
             color: #1e293b;
         }
-        .container {
+        main {
             max-width: 480px;
             margin: 25px auto;
         }
         h1 { font-size: 26px; margin-bottom: 5px; }
+        h3 { margin-top: 0; }
         .subtitle { color: #64748b; }
         .card {
             background: white;
-            border-radius: 14px;
             padding: 22px;
+            border-radius: 14px;
             margin-top: 16px;
             box-shadow: 0 2px 8px #0000000d;
         }
@@ -40,9 +47,9 @@ HTML_PAGE = """
         button {
             width: 100%;
             padding: 15px;
+            background: #2563eb;
             border: none;
             border-radius: 10px;
-            background: #2563eb;
             color: white;
             font-size: 16px;
             cursor: pointer;
@@ -51,45 +58,60 @@ HTML_PAGE = """
     </style>
 </head>
 <body>
-    <main class="container">
+    <main>
         <h1>Remote Lab</h1>
         <p class="subtitle">모바일 테스트 관리 시스템</p>
 
         <div class="card">
             <h3>Render 서버</h3>
-            <p>연결 상태: <span id="server-status">확인 중</span></p>
-            <p class="note" id="server-time"></p>
+            <p>연결 상태: <span id="server">확인 중</span></p>
         </div>
 
         <div class="card">
             <h3>테스트 PC</h3>
-            <p>연결 상태: <span class="muted">미연결</span></p>
-            <p class="note">테스트 PC 연결 기능은 아직 구현되지 않았습니다.</p>
+            <p>연결 상태: <span id="pc">확인 중</span></p>
+            <p class="note" id="last-seen"></p>
         </div>
 
         <div class="card">
-            <button onclick="checkServer()">서버 상태 확인</button>
+            <button onclick="checkStatus()">연결 상태 새로고침</button>
+            <p class="note">10초마다 자동 갱신됩니다.</p>
         </div>
     </main>
 
     <script>
-        async function checkServer() {
-            const status = document.getElementById("server-status");
-            const time = document.getElementById("server-time");
+        async function checkStatus() {
+            const server = document.getElementById("server");
+            const pc = document.getElementById("pc");
+            const lastSeen = document.getElementById("last-seen");
+
             try {
-                const response = await fetch("/health", {cache: "no-store"});
+                const response = await fetch("/api/status", {
+                    cache: "no-store"
+                });
                 if (!response.ok) throw new Error("HTTP error");
                 const data = await response.json();
-                status.textContent = "정상 작동";
-                status.className = "online";
-                time.textContent = "서버 시간(UTC): " + data.timestamp;
+
+                server.textContent = "정상 작동";
+                server.className = "online";
+
+                pc.textContent = data.pc_online ? "온라인" : "오프라인";
+                pc.className = data.pc_online ? "online" : "offline";
+
+                lastSeen.textContent = data.last_seen
+                    ? "마지막 접속: " + new Date(data.last_seen).toLocaleString("ko-KR")
+                    : "아직 연결된 기록이 없습니다.";
             } catch (error) {
-                status.textContent = "연결 실패";
-                status.className = "offline";
-                time.textContent = "서버 상태를 확인할 수 없습니다.";
+                server.textContent = "연결 실패";
+                server.className = "offline";
+                pc.textContent = "확인 불가";
+                pc.className = "muted";
+                lastSeen.textContent = "";
             }
         }
-        checkServer();
+
+        checkStatus();
+        setInterval(checkStatus, 10000);
     </script>
 </body>
 </html>
@@ -102,3 +124,20 @@ async def root():
 @app.get("/health")
 async def health():
     return {"status": "online", "timestamp": datetime.now(timezone.utc).isoformat()}
+
+@app.post("/api/heartbeat")
+async def heartbeat(x_device_token: str | None = Header(default=None)):
+    global last_heartbeat
+
+    expected_token = os.environ.get("DEVICE_TOKEN")
+    if not expected_token or not x_device_token or not secrets.compare_digest(x_device_token, expected_token):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    last_heartbeat = time.time()
+    return {"status": "received"}
+
+@app.get("/api/status")
+async def status():
+    online = last_heartbeat > 0 and time.time() - last_heartbeat < 45
+    last_seen = datetime.fromtimestamp(last_heartbeat, timezone.utc).isoformat() if last_heartbeat else None
+    return {"pc_online": online, "last_seen": last_seen}
